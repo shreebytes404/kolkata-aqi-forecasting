@@ -18,7 +18,7 @@ from src.config import (
 )
 
 REQUIRED_AIR_COLUMNS = {"date", "station", "aqi"}
-WEATHER_COLUMNS = ["temperature_2m_mean", "relative_humidity_2m_mean", "wind_speed_10m_max", "surface_pressure_mean"]
+WEATHER_COLUMNS = ["temperature_2m_mean", "relative_humidity_2m_mean", "wind_speed_10m_max", "pressure_msl_mean"]
 
 
 def load_air_quality(path: Path, station: str = DEFAULT_STATION) -> pd.DataFrame:
