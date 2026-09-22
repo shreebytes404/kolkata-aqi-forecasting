@@ -1,0 +1,20 @@
+# Python and notebook artifacts
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+
+# Local data and trained artifacts (re-create from documented sources)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+models/*
+!models/.gitkeep
+reports/figures/*
+!reports/figures/.gitkeep
+
+# Streamlit and operating-system files
+.streamlit/secrets.toml
+.DS_Store
+Thumbs.db
