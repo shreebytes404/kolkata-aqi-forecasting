@@ -18,11 +18,15 @@ from sklearn.preprocessing import OneHotEncoder
 from src.config import METADATA_PATH, MODEL_PATH, PROCESSED_PATH, TARGET_COLUMN
 
 
-def regression_metrics(actual: pd.Series, predicted: pd.Series) -> dict[str, float]:
+def regression_metrics(actual: pd.Series, predicted) -> dict[str, float]:
+    predicted = pd.Series(predicted, index=actual.index)
+    valid = actual.notna() & predicted.notna()
+    actual, predicted = actual[valid], predicted[valid]
     return {
         "mae": round(float(mean_absolute_error(actual, predicted)), 3),
         "rmse": round(float(mean_squared_error(actual, predicted) ** 0.5), 3),
         "r2": round(float(r2_score(actual, predicted)), 3),
+        "n_rows": int(valid.sum()),
     }
 
 
