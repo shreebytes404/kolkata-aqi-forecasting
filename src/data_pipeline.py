@@ -1,4 +1,4 @@
-"""Validated, leakage-safe construction of a daily forecasting dataset."""
+"""Import, audit, and feature construction for station-level AQI forecasting."""
 
 from __future__ import annotations
 
@@ -9,43 +9,107 @@ import numpy as np
 import pandas as pd
 import requests
 
-from src.config import (
-    DEFAULT_STATION,
-    KOLKATA_LATITUDE,
-    KOLKATA_LONGITUDE,
-    LAGS,
-    ROLLING_WINDOWS,
-)
+from src.config import KOLKATA_LATITUDE, KOLKATA_LONGITUDE, LAGS, ROLLING_WINDOWS
 
-REQUIRED_AIR_COLUMNS = {"date", "station", "aqi"}
-WEATHER_COLUMNS = ["temperature_2m_mean", "relative_humidity_2m_mean", "wind_speed_10m_max", "pressure_msl_mean"]
+WEATHER_COLUMNS = [
+    "temperature_2m_mean",
+    "relative_humidity_2m_mean",
+    "wind_speed_10m_max",
+    "pressure_msl_mean",
+]
+
+# Map common source names to one research schema. Raw files are never overwritten.
+COLUMN_ALIASES = {
+    "date": "date", "timestamp": "date", "datetime": "date", "date_time": "date",
+    "station": "station", "station_name": "station", "monitoring_station": "station",
+    "aqi": "aqi", "air_quality_index": "aqi",
+    "pm2_5": "pm25", "pm2.5": "pm25", "pm25": "pm25", "pm10": "pm10",
+    "no2": "no2", "so2": "so2", "co": "co", "o3": "o3", "nh3": "nh3",
+    "temperature_c": "temperature_c", "temperature": "temperature_c",
+    "humidity_pct": "humidity_pct", "humidity": "humidity_pct",
+    "wind_speed_ms": "wind_speed_ms", "wind_speed": "wind_speed_ms",
+    "wind_direction_deg": "wind_direction_deg", "wind_direction": "wind_direction_deg",
+    "rain_mm": "rain_mm", "rainfall": "rain_mm",
+}
 
 
-def load_air_quality(path: Path, station: str = DEFAULT_STATION) -> pd.DataFrame:
-    """Load one documented daily AQI dataset and reject ambiguous input early."""
-    if not path.exists():
+def _normalise_column_name(name: object) -> str:
+    return str(name).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def read_raw_files(input_dir: Path) -> pd.DataFrame:
+    """Read all CSV/XLSX source exports without changing the originals."""
+    paths = sorted(path for path in input_dir.glob("*") if path.suffix.lower() in {".csv", ".xlsx"})
+    if not paths:
         raise FileNotFoundError(
-            f"Missing {path.name}. Download/export daily station data first; see README.md."
+            f"No CSV or XLSX files found in {input_dir}. Place original portal exports there."
         )
-    frame = pd.read_csv(path)
-    frame.columns = [column.strip().lower() for column in frame.columns]
-    missing = REQUIRED_AIR_COLUMNS - set(frame.columns)
-    if missing:
-        raise ValueError(f"Required columns missing: {sorted(missing)}")
+    frames: list[pd.DataFrame] = []
+    for path in paths:
+        if path.suffix.lower() == ".csv":
+            source_frames = [("csv", pd.read_csv(path))]
+        else:
+            book = pd.ExcelFile(path)
+            source_frames = [(sheet, pd.read_excel(path, sheet_name=sheet)) for sheet in book.sheet_names]
+        for sheet, frame in source_frames:
+            frame["source_file"] = path.name
+            frame["source_sheet"] = sheet
+            frames.append(frame)
+    return pd.concat(frames, ignore_index=True, sort=False)
 
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
-    frame["aqi"] = pd.to_numeric(frame["aqi"], errors="coerce")
-    frame["station"] = frame["station"].astype(str).str.strip()
-    frame = frame.loc[frame["station"].eq(station), ["date", "station", "aqi"]]
-    frame = frame.dropna().sort_values("date").drop_duplicates("date", keep="last")
-    frame = frame.loc[frame["aqi"].between(0, 500)].copy()
-    if len(frame) < 120:
-        raise ValueError("At least 120 valid daily observations are required for the first model.")
-    return frame
+
+def standardise_air_data(raw: pd.DataFrame) -> pd.DataFrame:
+    """Create a canonical table while retaining provenance columns."""
+    data = raw.copy()
+    data.columns = [_normalise_column_name(column) for column in data.columns]
+    data = data.rename(columns={column: COLUMN_ALIASES.get(column, column) for column in data.columns})
+    if "date" not in data or "aqi" not in data:
+        raise ValueError("Source data must include a date/timestamp column and an AQI column.")
+    if "station" not in data:
+        raise ValueError("Source data must include a station or station_name column.")
+    data["date"] = pd.to_datetime(data["date"], errors="coerce")
+    data["station"] = data["station"].astype(str).str.strip()
+    numeric_columns = [
+        "aqi", "pm25", "pm10", "no2", "so2", "co", "o3", "nh3",
+        "temperature_c", "humidity_pct", "wind_speed_ms", "wind_direction_deg", "rain_mm",
+    ]
+    for column in numeric_columns:
+        if column in data:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
+    data = data.loc[data["date"].notna() & data["station"].notna()].copy()
+    data["date"] = data["date"].dt.tz_localize(None)
+    return data
+
+
+def create_data_quality_report(data: pd.DataFrame) -> dict[str, object]:
+    """Return source-quality diagnostics without silently repairing data."""
+    report: dict[str, object] = {"rows_read": int(len(data)), "stations": {}}
+    for station, group in data.groupby("station", dropna=False):
+        group = group.sort_values("date")
+        report["stations"][str(station)] = {
+            "rows": int(len(group)),
+            "start": group["date"].min().isoformat() if not group.empty else None,
+            "end": group["date"].max().isoformat() if not group.empty else None,
+            "duplicate_timestamps": int(group.duplicated(["station", "date"]).sum()),
+            "missing_by_column": {key: int(value) for key, value in group.isna().sum().items()},
+            "aqi_outside_0_500": int((~group["aqi"].between(0, 500)).sum()),
+        }
+    return report
+
+
+def aggregate_to_daily(data: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate sub-daily measurements to daily means and document the target definition."""
+    data = data.copy()
+    data["date"] = data["date"].dt.normalize()
+    numeric = data.select_dtypes(include="number").columns.tolist()
+    daily = data.groupby(["station", "date"], as_index=False)[numeric].mean()
+    # This is a daily mean of reported AQI, not a replacement official AQI calculation.
+    daily["daily_aqi_definition"] = "mean_of_source_observations"
+    return daily.sort_values(["station", "date"]).reset_index(drop=True)
 
 
 def fetch_daily_weather(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Fetch reproducible historical daily weather from Open-Meteo Archive."""
+    """Fetch reproducible daily weather values for Kolkata from Open-Meteo Archive."""
     response = requests.get(
         "https://archive-api.open-meteo.com/v1/archive",
         params={
@@ -67,18 +131,32 @@ def fetch_daily_weather(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     return weather
 
 
-def build_features(air: pd.DataFrame, weather: pd.DataFrame) -> pd.DataFrame:
-    """Build features using strictly past AQI values; never use the future target."""
-    data = air.merge(weather, on="date", how="left").sort_values("date").reset_index(drop=True)
-    # Weather gaps are retained until the training pipeline imputes them within each CV fold.
-    for lag in LAGS:
-        data[f"aqi_lag_{lag}"] = data["aqi"].shift(lag)
-    for window in ROLLING_WINDOWS:
-        data[f"aqi_rolling_mean_{window}"] = data["aqi"].shift(1).rolling(window).mean()
-
+def build_features(daily: pd.DataFrame, weather: pd.DataFrame) -> pd.DataFrame:
+    """Build station-wise features using only information available by the end of day t."""
+    data = daily.merge(weather, on="date", how="left").sort_values(["station", "date"]).reset_index(drop=True)
+    weather_mapping = {
+        "temperature_c": "temperature_2m_mean",
+        "humidity_pct": "relative_humidity_2m_mean",
+        "wind_speed_ms": "wind_speed_10m_max",
+    }
+    for existing, archive in weather_mapping.items():
+        if existing in data:
+            data[archive] = data[existing].combine_first(data[archive])
+    for _, group in data.groupby("station"):
+        for lag in LAGS:
+            data.loc[group.index, f"aqi_lag_{lag}"] = group["aqi"].shift(lag)
+        for window in ROLLING_WINDOWS:
+            data.loc[group.index, f"aqi_rolling_mean_{window}"] = group["aqi"].shift(1).rolling(window).mean()
+        for pollutant in ["pm25", "pm10", "no2", "so2", "co", "o3", "nh3"]:
+            if pollutant in group:
+                data.loc[group.index, f"{pollutant}_lag_1"] = group[pollutant].shift(1)
+        data.loc[group.index, "aqi_next_day"] = group["aqi"].shift(-1)
+    if "wind_direction_deg" in data:
+        angle = np.deg2rad(data["wind_direction_deg"])
+        data["wind_direction_sin"] = np.sin(angle)
+        data["wind_direction_cos"] = np.cos(angle)
     data["day_of_week"] = data["date"].dt.dayofweek
     data["month"] = data["date"].dt.month
     data["day_of_year_sin"] = np.sin(2 * np.pi * data["date"].dt.dayofyear / 365.25)
     data["day_of_year_cos"] = np.cos(2 * np.pi * data["date"].dt.dayofyear / 365.25)
-    data["aqi_next_day"] = data["aqi"].shift(-1)
     return data.dropna(subset=["aqi_next_day", "aqi_lag_3", "aqi_rolling_mean_7"]).copy()

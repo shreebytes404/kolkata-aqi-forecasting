@@ -13,6 +13,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
 from src.config import METADATA_PATH, MODEL_PATH, PROCESSED_PATH, TARGET_COLUMN
 
@@ -25,9 +26,13 @@ def regression_metrics(actual: pd.Series, predicted: pd.Series) -> dict[str, flo
     }
 
 
-def make_pipeline(model: object, features: list[str]) -> Pipeline:
+def make_pipeline(model: object, numeric_features: list[str]) -> Pipeline:
     preprocessing = ColumnTransformer(
-        [("numeric", SimpleImputer(strategy="median"), features)], remainder="drop"
+        [
+            ("numeric", SimpleImputer(strategy="median"), numeric_features),
+            ("station", OneHotEncoder(handle_unknown="ignore"), ["station"]),
+        ],
+        remainder="drop",
     )
     return Pipeline([("preprocess", preprocessing), ("model", model)])
 
@@ -36,8 +41,12 @@ def main() -> None:
     if not PROCESSED_PATH.exists():
         raise FileNotFoundError("Run `python -m src.prepare_data` before training.")
     data = pd.read_csv(PROCESSED_PATH, parse_dates=["date"]).sort_values("date")
-    excluded = {"date", "station", "aqi", TARGET_COLUMN}
-    features = [column for column in data.columns if column not in excluded]
+    excluded = {"date", "station", "aqi", TARGET_COLUMN, "daily_aqi_definition"}
+    candidate_features = [column for column in data.columns if column not in excluded]
+    numeric_features = [
+        column for column in candidate_features if pd.api.types.is_numeric_dtype(data[column])
+    ]
+    features = ["station", *numeric_features]
     if len(data) < 120:
         raise ValueError("Need at least 120 prepared rows to reserve an honest test set.")
 
@@ -48,12 +57,12 @@ def main() -> None:
     X_test, y_test = test[features], test[TARGET_COLUMN]
 
     candidates = {
-        "linear_regression": make_pipeline(LinearRegression(), features),
+        "linear_regression": make_pipeline(LinearRegression(), numeric_features),
         "random_forest": make_pipeline(
             RandomForestRegressor(
                 n_estimators=400, max_depth=10, min_samples_leaf=2, random_state=42, n_jobs=-1
             ),
-            features,
+            numeric_features,
         ),
     }
     results: dict[str, dict[str, float]] = {}

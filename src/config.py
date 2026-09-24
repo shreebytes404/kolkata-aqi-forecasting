@@ -3,13 +3,19 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RAW_AIR_PATH = ROOT / "data" / "raw" / "air_quality_daily.csv"
+RAW_DATA_DIR = ROOT / "data" / "raw"
 PROCESSED_PATH = ROOT / "data" / "processed" / "model_dataset.csv"
+AUDIT_PATH = ROOT / "reports" / "data_quality_report.json"
 MODEL_PATH = ROOT / "models" / "best_model.joblib"
 METADATA_PATH = ROOT / "models" / "model_metadata.json"
 
-# Fort William is the initial station. Change only after documenting the reason.
-DEFAULT_STATION = "Fort William"
+# The first paper analyses these four Kolkata stations. Keep names consistent with source records.
+SUPPORTED_STATIONS = (
+    "Ballygunge",
+    "Bidhannagar",
+    "Fort William",
+    "Rabindra Bharati University",
+)
 KOLKATA_LATITUDE = 22.556
 KOLKATA_LONGITUDE = 88.338
 TARGET_COLUMN = "aqi_next_day"
