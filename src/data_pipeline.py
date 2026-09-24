@@ -20,7 +20,7 @@ WEATHER_COLUMNS = [
 
 # Map common source names to one research schema. Raw files are never overwritten.
 COLUMN_ALIASES = {
-    "date": "date", "timestamp": "date", "datetime": "date", "date_time": "date",
+    "date": "date", "timestamp": "date", "datetime": "date", "date_time": "date", "date_ist": "date", "date_ist": "date",
     "station": "station", "station_name": "station", "monitoring_station": "station",
     "aqi": "aqi", "air_quality_index": "aqi",
     "pm2_5": "pm25", "pm2.5": "pm25", "pm25": "pm25", "pm10": "pm10",
@@ -67,7 +67,7 @@ def standardise_air_data(raw: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Source data must include a date/timestamp column and an AQI column.")
     if "station" not in data:
         raise ValueError("Source data must include a station or station_name column.")
-    data["date"] = pd.to_datetime(data["date"], errors="coerce")
+    data["date"] = pd.to_datetime(data["date"], errors="coerce", dayfirst=True)
     data["station"] = data["station"].astype(str).str.strip()
     numeric_columns = [
         "aqi", "pm25", "pm10", "no2", "so2", "co", "o3", "nh3",
