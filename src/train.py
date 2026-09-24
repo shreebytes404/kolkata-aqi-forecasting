@@ -41,7 +41,7 @@ def main() -> None:
     if not PROCESSED_PATH.exists():
         raise FileNotFoundError("Run `python -m src.prepare_data` before training.")
     data = pd.read_csv(PROCESSED_PATH, parse_dates=["date"]).sort_values("date")
-    excluded = {"date", "station", "aqi", TARGET_COLUMN, "daily_aqi_definition"}
+    excluded = {"date", "station", TARGET_COLUMN, "daily_aqi_definition"}
     candidate_features = [column for column in data.columns if column not in excluded]
     numeric_features = [
         column for column in candidate_features if pd.api.types.is_numeric_dtype(data[column])
@@ -66,7 +66,7 @@ def main() -> None:
         ),
     }
     results: dict[str, dict[str, float]] = {}
-    baseline = test["aqi_lag_1"]
+    baseline = test["aqi"]
     results["persistence_baseline"] = regression_metrics(y_test, baseline)
 
     tscv = TimeSeriesSplit(n_splits=4)
