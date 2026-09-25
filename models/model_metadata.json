@@ -1,0 +1,59 @@
+{
+  "target": "aqi_next_day",
+  "forecast_horizon": "next day (t+1)",
+  "features": [
+    "station",
+    "aqi",
+    "pm25_ug_m3",
+    "pm10_ug_m3",
+    "no2_ug_m3",
+    "so2_ug_m3",
+    "co_mg_m3",
+    "o3_ug_m3",
+    "nh3_ug_m3",
+    "temperature_2m_mean",
+    "relative_humidity_2m_mean",
+    "wind_speed_10m_max",
+    "pressure_msl_mean",
+    "aqi_lag_1",
+    "aqi_lag_2",
+    "aqi_lag_3",
+    "aqi_rolling_mean_3",
+    "aqi_rolling_mean_7",
+    "day_of_week",
+    "month",
+    "day_of_year_sin",
+    "day_of_year_cos"
+  ],
+  "best_model": "random_forest",
+  "train_rows": 2827,
+  "test_rows": 707,
+  "test_start": "2026-02-22",
+  "test_end": "2026-08-30",
+  "results": {
+    "persistence_baseline": {
+      "mae": 8.744,
+      "rmse": 12.307,
+      "r2": 0.744,
+      "n_rows": 702,
+      "cv_mae_mean": 15.461,
+      "cv_mae_std": 5.859
+    },
+    "linear_regression": {
+      "mae": 8.521,
+      "rmse": 11.779,
+      "r2": 0.766,
+      "n_rows": 707,
+      "cv_mae_mean": 18.228,
+      "cv_mae_std": 6.165
+    },
+    "random_forest": {
+      "mae": 7.685,
+      "rmse": 10.731,
+      "r2": 0.806,
+      "n_rows": 707,
+      "cv_mae_mean": 15.547,
+      "cv_mae_std": 5.829
+    }
+  }
+}
