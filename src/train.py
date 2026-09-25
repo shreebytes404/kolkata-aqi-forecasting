@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
@@ -82,6 +83,15 @@ def main() -> None:
         results[name] = regression_metrics(y_test, pipeline.predict(X_test))
         results[name]["cv_mae_mean"] = round(float(cv_scores.mean()), 3)
         results[name]["cv_mae_std"] = round(float(cv_scores.std()), 3)
+
+    baseline_cv_scores = []
+    for _, val_idx in tscv.split(X_train):
+        val = train.iloc[val_idx]
+        actual, pred = val[TARGET_COLUMN], val["aqi"]
+        valid = actual.notna() & pred.notna()
+        baseline_cv_scores.append(mean_absolute_error(actual[valid], pred[valid]))
+    results["persistence_baseline"]["cv_mae_mean"] = round(float(np.mean(baseline_cv_scores)), 3)
+    results["persistence_baseline"]["cv_mae_std"] = round(float(np.std(baseline_cv_scores)), 3)
 
     best_name = min(fitted_models, key=lambda name: results[name]["mae"])
     best_model = fitted_models[best_name]
