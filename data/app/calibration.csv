@@ -1,0 +1,4 @@
+season,n,mae,q50,q80,q90
+monsoon (Jun-Sep),17914,13.6,8.9,19.5,28.5
+"pre-monsoon (Mar-May, Oct)",18347,17.1,11.4,25.5,39.6
+winter (Nov-Feb),18520,45.5,36.8,75.9,100.3
