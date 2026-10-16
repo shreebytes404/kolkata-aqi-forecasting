@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import colorsys
 import json
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.spatial import bearing_deg, estimate, haversine_km  # noqa: E402
 from src.live import ATTRIBUTION, fetch_live, us_category  # noqa: E402
-from src.weather import elevations, wind_from_open_meteo  # noqa: E402
+from src.weather import elevations, wind_from_open_meteo, wind_series_open_meteo  # noqa: E402
 
 APP_DATA = ROOT / "data" / "app"
 
@@ -59,13 +60,38 @@ def load_forecast_tables():
     return (pd.read_csv(APP_DATA / "forecast_ranges.csv"), pd.read_csv(APP_DATA / "forecast_summary.csv"))
 
 
+class _LiveFailed(Exception):
+    """Raised so that failed fetches are never cached (Streamlit does not cache exceptions)."""
+
+
 @st.cache_data(ttl=600, show_spinner="Fetching live readings...")
+def _live_cached(token: str):
+    df, info = fetch_live(token)
+    if df.empty:
+        raise _LiveFailed(info)
+    return df, info
+
+
 def live_readings():
+    """Returns (df, info). info['token_source'] says where the token came from, without revealing it."""
     try:
-        token = st.secrets["WAQI_TOKEN"]
-    except Exception:  # noqa: BLE001
-        token = None
-    return fetch_live(token)
+        token, source = st.secrets["WAQI_TOKEN"], "found in Streamlit secrets"
+    except KeyError:
+        token, source = None, "key WAQI_TOKEN not found in Streamlit secrets"
+    except Exception as e:  # noqa: BLE001
+        token, source = None, f"Streamlit secrets could not be read ({type(e).__name__}); check the TOML format"
+    token = str(token).strip().strip('"').strip("'") if token else None
+    if not token:
+        df, info = fetch_live(None)            # falls back to the WAQI_TOKEN environment variable, if any
+        info["token_source"] = source if df.empty else "environment variable"
+        return df, info
+    try:
+        df, info = _live_cached(token)
+    except _LiveFailed as e:
+        df, info = pd.DataFrame(), (e.args[0] if e.args else {"error": "unknown"})
+    info["token_source"] = source
+    info["token_length"] = len(token)
+    return df, info
 
 
 if not (APP_DATA / "hourly_aqi.csv.gz").exists():
@@ -84,6 +110,29 @@ def load_wind_obs():
 @st.cache_data(ttl=3600, show_spinner=False)
 def _om_wind(lat: float, lon: float, ts: pd.Timestamp):
     return wind_from_open_meteo(round(lat, 2), round(lon, 2), ts)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _om_series(lat: float, lon: float, start: pd.Timestamp, end: pd.Timestamp):
+    return wind_series_open_meteo(round(lat, 2), round(lon, 2), start, end)
+
+
+def get_wind_series(lat: float, lon: float, ts: pd.Timestamp):
+    """Hourly wind from 12 h before to 24 h after ts: (DataFrame wd_deg/ws indexed by hour, source) or (None, None)."""
+    start, end = ts - pd.Timedelta(hours=12), ts + pd.Timedelta(hours=24)
+    obs = load_wind_obs()
+    if len(obs) and start >= obs.index.min() and end <= obs.index.max():
+        sub = obs.reindex(pd.date_range(start, end, freq="h"))[["wd_deg", "ws"]]
+        if sub["wd_deg"].notna().mean() > 0.7:
+            return sub, "station observations, city average"
+    om = _om_series(lat, lon, start, end)
+    return (om, "Open-Meteo") if om is not None else (None, None)
+
+
+def wind_rgb(from_deg: float) -> list[int]:
+    """Colour by compass direction the wind comes FROM: N red, E yellow-green, S cyan, W violet."""
+    r, g, b = colorsys.hsv_to_rgb((from_deg % 360) / 360.0, 0.75, 0.9)
+    return [int(r * 255), int(g * 255), int(b * 255)]
 
 
 def get_wind(lat: float, lon: float, ts: pd.Timestamp):
@@ -108,11 +157,13 @@ with tab_est:
         st.subheader("1. Choose a place")
         preset = st.selectbox("Quick pick", ["Type my own coordinates"] + stations["station"].tolist() + [
             "Howrah Station area (22.585, 88.342)", "Salt Lake Sector V (22.570, 88.430)",
-            "Dum Dum Airport (22.654, 88.447)", "Behala Chowrasta (22.499, 88.318)"])
+            "Dum Dum Airport (22.654, 88.447)", "Behala Chowrasta (22.499, 88.318)",
+            "Newtown (approx. 22.590, 88.470)"])
         defaults = {"Howrah Station area (22.585, 88.342)": (22.585, 88.342),
                     "Salt Lake Sector V (22.570, 88.430)": (22.570, 88.430),
                     "Dum Dum Airport (22.654, 88.447)": (22.654, 88.447),
-                    "Behala Chowrasta (22.499, 88.318)": (22.499, 88.318)}
+                    "Behala Chowrasta (22.499, 88.318)": (22.499, 88.318),
+                    "Newtown (approx. 22.590, 88.470)": (22.590, 88.470)}
         if preset in defaults:
             dlat, dlon = defaults[preset]
         elif preset in stations["station"].values:
@@ -120,8 +171,26 @@ with tab_est:
             dlat, dlon = float(row["latitude"]), float(row["longitude"])
         else:
             dlat, dlon = 22.5726, 88.3639
-        qlat = st.number_input("Latitude", value=dlat, format="%.5f", step=0.001, key=f"lat_{preset}")
-        qlon = st.number_input("Longitude", value=dlon, format="%.5f", step=0.001, key=f"lon_{preset}")
+        use_here = st.checkbox("Use my current location")
+        if use_here:
+            try:
+                from streamlit_geolocation import streamlit_geolocation
+                loc = streamlit_geolocation()
+            except Exception:  # noqa: BLE001
+                loc = None
+                st.caption("The location button is not available in this deployment.")
+            if loc and loc.get("latitude") is not None:
+                dlat, dlon = float(loc["latitude"]), float(loc["longitude"])
+                acc = loc.get("accuracy")
+                st.success(f"Using your location ({dlat:.4f}, {dlon:.4f})" + (f", accurate to about {acc:.0f} m" if acc else ""))
+            else:
+                st.caption("Click the button above, then allow location access in your browser.")
+        qlat = st.number_input("Latitude", value=dlat, format="%.5f", step=0.001, key=f"lat_{preset}_{dlat:.4f}")
+        qlon = st.number_input("Longitude", value=dlon, format="%.5f", step=0.001, key=f"lon_{preset}_{dlon:.4f}")
+        if haversine_km(qlat, qlon, 22.5726, 88.3639) > 40:
+            st.warning("This point is more than 40 km from central Kolkata, so the estimate is not meaningful.")
+        elif preset.startswith("Newtown"):
+            st.caption("Newtown has no monitoring station in our data; the estimate comes from stations several km away.")
 
         st.subheader("2. Choose the data")
         mode = st.radio("Data source", ["Recorded (CPCB, up to 30 Sep 2026)", "Live now (WAQI, US scale)"],
@@ -150,6 +219,7 @@ with tab_est:
             st.caption(ATTRIBUTION)
             with st.expander("Live feed details"):
                 st.write({k: v for k, v in live_info.items() if k != "unmatched"})
+                st.caption("token_source tells you whether the app can see your secret. The token itself is never shown.")
                 st.write("Stations found by WAQI but not matched to ours:", live_info.get("unmatched", [])[:25])
                 if not live_df.empty:
                     st.dataframe(live_df, hide_index=True)
@@ -197,6 +267,13 @@ with tab_est:
             st.caption(f"Range is the 80th percentile of past errors for {season}, measured by hiding each station in turn "
                        "and estimating it from the others. It is wide in winter, when AQI is volatile.")
 
+        wser, wser_src = (None, None)
+        offset = 0
+        if wind_dir is not None:
+            wser, wser_src = get_wind_series(qlat, qlon, ts)
+            if wser is not None:
+                offset = st.slider("Wind outlook: hours before (-) or after (+) the chosen time", -12, 24, 0)
+
         # ---- map: stations, links to the chosen point (thicker = more weight), and wind arrows
         s["colour"] = s["aqi"].map(lambda a: hex_rgb(cat(a)[1]) if pd.notna(a) else [150, 150, 150])
         s["label"] = s["aqi"].map(lambda a: f"{a:.0f}" if pd.notna(a) else "")
@@ -217,20 +294,45 @@ with tab_est:
             pdk.Layer("ScatterplotLayer", data=pd.DataFrame({"longitude": [qlon], "latitude": [qlat]}),
                       get_position="[longitude, latitude]", get_fill_color=[20, 20, 20], get_radius=300),
         ]
-        if wind_dir is not None:
-            toward = (wind_dir + 180) % 360  # direction the air is moving TOWARD
+        shown_dir = wind_dir
+        if wind_dir is not None and wser is not None:
+            when = ts + pd.Timedelta(hours=offset)
+            if when in wser.index and pd.notna(wser.loc[when, "wd_deg"]):
+                shown_dir = float(wser.loc[when, "wd_deg"])
+        if shown_dir is not None:
+            toward = (shown_dir + 180) % 360  # direction the air is moving TOWARD
             gl = [(qlat + dy, qlon + dx) for dy in (-0.06, 0, 0.06) for dx in (-0.08, 0, 0.08)]
             arrows = pd.DataFrame({"latitude": [g[0] for g in gl], "longitude": [g[1] for g in gl],
-                                   "angle": 90 - toward, "t": "➤"})
+                                   "angle": 90 - toward, "t": "➤", "rgb": [wind_rgb(shown_dir) + [210]] * len(gl)})
             layers.append(pdk.Layer("TextLayer", data=arrows, get_position="[longitude, latitude]", get_text="t",
-                                    get_angle="angle", get_size=30, get_color=[0, 90, 200, 190]))
+                                    get_angle="angle", get_size=30, get_color="rgb"))
         st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=pdk.ViewState(latitude=qlat, longitude=qlon, zoom=10.5),
                                  tooltip={"text": "{station}\nAQI {aqi}"}), height=460)
         if wind_dir is not None:
             spd = f"{wind[1]:.1f} m/s" if not np.isnan(wind[1]) else "speed n/a"
-            st.caption(f"Blue arrows: wind direction ({wind[2]}). Wind from {wind_dir:.0f}°, {spd}, blowing toward "
-                       f"{(wind_dir + 180) % 360:.0f}°. Dots show each station's AQI. Lines run from each station to your "
-                       "point: thicker = more weight, red = upwind of your point.")
+            st.caption(f"Arrow colour = the direction the wind comes FROM; arrows point where the air is going "
+                       f"({wind[2]}: from {wind_dir:.0f}°, {spd}). Dots show each station's AQI. Lines run from each station to "
+                       "your point: thicker = more weight, red = upwind of your point.")
+            chips = "".join(f"<span style='display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;"
+                            f"background:rgb({','.join(map(str, wind_rgb(a)))});color:#111;font-size:12px'>{n} {a:.0f}°</span>"
+                            for n, a in [("N", 0), ("NE", 45), ("E", 90), ("SE", 135), ("S", 180), ("SW", 225), ("W", 270), ("NW", 315)])
+            st.markdown("<div>Colour key (wind coming from): " + chips + "</div>", unsafe_allow_html=True)
+            if wser is not None:
+                st.markdown("**How the wind changes around this time** (" + wser_src + "; the AQI estimate itself stays at the chosen hour)")
+                cells = []
+                for k in range(-12, 25, 3):
+                    t = ts + pd.Timedelta(hours=k)
+                    if t in wser.index and pd.notna(wser.loc[t, "wd_deg"]):
+                        a, sp = float(wser.loc[t, "wd_deg"]), wser.loc[t, "ws"]
+                        bold = "border:2px solid #111;" if k == offset else ""
+                        cells.append(f"<div style='display:inline-block;text-align:center;margin:2px 8px 2px 0;{bold}padding:2px 6px;border-radius:6px'>"
+                                     f"<div style='font-size:11px'>{t:%a %H}h</div>"
+                                     f"<div style='font-size:26px;line-height:26px;color:rgb({','.join(map(str, wind_rgb(a)))});"
+                                     f"transform:rotate({(a + 180) % 360 - 90:.0f}deg)'>➤</div>"
+                                     f"<div style='font-size:11px'>{a:.0f}°, {sp:.1f} m/s</div></div>")
+                st.markdown("".join(cells), unsafe_allow_html=True)
+                st.caption("Wind is a single value for the whole city at each hour. It varies very little across Kolkata, "
+                           "so the arrows on the map are all the same; the change you can see is over time.")
         else:
             st.caption("Dots show each station's AQI. Lines run from each station to your point (thicker = more weight). "
                        "Wind data is not available for this time.")

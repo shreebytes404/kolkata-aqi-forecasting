@@ -7,3 +7,4 @@ matplotlib>=3.8,<4
 seaborn>=0.13,<1
 streamlit>=1.39,<2
 pydeck>=0.9
+streamlit-geolocation>=0.0.10
