@@ -1,0 +1,13 @@
+horizon_h,season,n,q50,q80
+1,monsoon (Jun-Sep),81384,0.0,1.0
+1,"pre-monsoon (Mar-May, Oct)",75990,1.0,2.0
+1,winter (Nov-Feb),69113,1.0,3.0
+3,monsoon (Jun-Sep),81156,1.0,3.0
+3,"pre-monsoon (Mar-May, Oct)",75785,2.0,5.0
+3,winter (Nov-Feb),68959,4.0,9.0
+6,monsoon (Jun-Sep),80877,2.0,5.0
+6,"pre-monsoon (Mar-May, Oct)",75532,4.0,9.0
+6,winter (Nov-Feb),68737,8.0,17.0
+24,monsoon (Jun-Sep),79430,6.0,15.0
+24,"pre-monsoon (Mar-May, Oct)",74419,10.0,23.0
+24,winter (Nov-Feb),67610,23.0,49.0

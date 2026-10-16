@@ -14,6 +14,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.spatial import bearing_deg, estimate, haversine_km  # noqa: E402
+from src.live import ATTRIBUTION, fetch_live, us_category  # noqa: E402
 from src.weather import elevations, wind_from_open_meteo  # noqa: E402
 
 APP_DATA = ROOT / "data" / "app"
@@ -51,6 +52,20 @@ def load_data():
     cal = pd.read_csv(APP_DATA / "calibration.csv").set_index("season")
     loso = pd.read_csv(APP_DATA / "loso_summary.csv")
     return stations, wide, cal, loso
+
+
+@st.cache_data
+def load_forecast_tables():
+    return (pd.read_csv(APP_DATA / "forecast_ranges.csv"), pd.read_csv(APP_DATA / "forecast_summary.csv"))
+
+
+@st.cache_data(ttl=600, show_spinner="Fetching live readings...")
+def live_readings():
+    try:
+        token = st.secrets["WAQI_TOKEN"]
+    except Exception:  # noqa: BLE001
+        token = None
+    return fetch_live(token)
 
 
 if not (APP_DATA / "hourly_aqi.csv.gz").exists():
@@ -108,11 +123,18 @@ with tab_est:
         qlat = st.number_input("Latitude", value=dlat, format="%.5f", step=0.001, key=f"lat_{preset}")
         qlon = st.number_input("Longitude", value=dlon, format="%.5f", step=0.001, key=f"lon_{preset}")
 
-        st.subheader("2. Choose a time")
-        t_min, t_max = wide.index.min().to_pydatetime(), wide.index.max().to_pydatetime()
-        day = st.date_input("Date", value=t_max.date(), min_value=t_min.date(), max_value=t_max.date())
-        hour = st.slider("Hour (IST)", 0, 23, 12)
-        ts = pd.Timestamp(day) + pd.Timedelta(hours=hour)
+        st.subheader("2. Choose the data")
+        mode = st.radio("Data source", ["Recorded (CPCB, up to 30 Sep 2026)", "Live now (WAQI, US scale)"],
+                        help="Live readings use the US AQI scale, which differs from India's CPCB scale. They are shown separately and never mixed.")
+        live = mode.startswith("Live")
+        if live:
+            ts = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).floor("h")
+            st.caption(f"Live readings for about {ts:%d %b %Y %H:%M} IST.")
+        else:
+            t_min, t_max = wide.index.min().to_pydatetime(), wide.index.max().to_pydatetime()
+            day = st.date_input("Date", value=t_max.date(), min_value=t_min.date(), max_value=t_max.date())
+            hour = st.slider("Hour (IST)", 0, 23, 12)
+            ts = pd.Timestamp(day) + pd.Timedelta(hours=hour)
 
         with st.expander("Wind", expanded=True):
             st.caption("Wind is fetched for the chosen time. Our tests found that weighting stations by wind did not "
@@ -122,10 +144,25 @@ with tab_est:
             manual_dir = st.slider("Wind blowing FROM (degrees, 0=N, 90=E)", 0, 359, 180, disabled=not manual_wind)
 
     with right:
-        if ts not in wide.index:
-            st.warning("No data for that time.")
-            st.stop()
-        readings = wide.loc[ts].reindex(stations["station"])
+        cat = us_category if live else categorize
+        if live:
+            live_df, live_info = live_readings()
+            st.caption(ATTRIBUTION)
+            with st.expander("Live feed details"):
+                st.write({k: v for k, v in live_info.items() if k != "unmatched"})
+                st.write("Stations found by WAQI but not matched to ours:", live_info.get("unmatched", [])[:25])
+                if not live_df.empty:
+                    st.dataframe(live_df, hide_index=True)
+            if live_df.empty:
+                st.warning("No live readings available right now" + (f" ({live_info['error']})" if live_info.get("error") else "")
+                           + ". Switch to recorded data.")
+                st.stop()
+            readings = live_df.set_index("station")["aqi"].reindex(stations["station"])
+        else:
+            if ts not in wide.index:
+                st.warning("No data for that time.")
+                st.stop()
+            readings = wide.loc[ts].reindex(stations["station"])
         s = stations.assign(aqi=readings.values)
         ok = s.dropna(subset=["aqi"])
         if len(ok) < 3:
@@ -142,23 +179,26 @@ with tab_est:
                                        wind_from_deg=wind_dir, wind_strength=1.5) if wind_dir is not None else (None, None, None)
         est, w = (est_wind, w_wind) if (use_wind and wind_dir is not None) else (est_plain, w_plain)
         season = season_of(ts.month)
-        half = float(cal.loc[season, "q80"])
-        lo, hi = max(0.0, est - half), min(500.0, est + half)
-        name, colour = categorize(est)
+        half = None if live else float(cal.loc[season, "q80"])
+        lo, hi = (None, None) if live else (max(0.0, est - half), min(500.0, est + half))
+        name, colour = cat(est)
         elev = get_elevations(tuple(s["latitude"]) + (qlat,), tuple(s["longitude"]) + (qlon,))
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Estimated AQI", f"{est:.0f}")
-        c2.metric("Likely range (80%)", f"{lo:.0f} to {hi:.0f}")
+        c2.metric("Likely range (80%)", "not calibrated" if live else f"{lo:.0f} to {hi:.0f}")
         c3.metric("Nearest station", f"{nearest_km:.1f} km")
         c4.metric("Altitude here", f"{elev[-1]:.0f} m" if elev else "n/a")
         st.markdown(f"<div style='padding:8px 12px;border-radius:6px;background:{colour};color:white;"
                     f"display:inline-block'>{name}</div>", unsafe_allow_html=True)
-        st.caption(f"Range is the 80th percentile of past errors for {season}, measured by hiding each station in turn "
-                   "and estimating it from the others. It is wide in winter, when AQI is volatile.")
+        if live:
+            st.caption("Live values are on the US AQI scale (WAQI), so the CPCB-based error range does not apply.")
+        else:
+            st.caption(f"Range is the 80th percentile of past errors for {season}, measured by hiding each station in turn "
+                       "and estimating it from the others. It is wide in winter, when AQI is volatile.")
 
         # ---- map: stations, links to the chosen point (thicker = more weight), and wind arrows
-        s["colour"] = s["aqi"].map(lambda a: hex_rgb(categorize(a)[1]) if pd.notna(a) else [150, 150, 150])
+        s["colour"] = s["aqi"].map(lambda a: hex_rgb(cat(a)[1]) if pd.notna(a) else [150, 150, 150])
         s["label"] = s["aqi"].map(lambda a: f"{a:.0f}" if pd.notna(a) else "")
         links = ok.assign(qlat=qlat, qlon=qlon, weight=100 * w)
         if wind_dir is not None:
@@ -194,6 +234,21 @@ with tab_est:
         else:
             st.caption("Dots show each station's AQI. Lines run from each station to your point (thicker = more weight). "
                        "Wind data is not available for this time.")
+
+        st.subheader("What happens next (forecast)")
+        if live:
+            st.info("Forecasts are only shown for recorded CPCB data, where we measured how accurate they are.")
+        else:
+            fr, fsum = load_forecast_tables()
+            rows = []
+            for hz in (1, 3, 6, 24):
+                q = float(fr[(fr["horizon_h"] == hz) & (fr["season"] == season)]["q80"].iloc[0])
+                rows.append({"In": f"{hz} hour" + ("s" if hz > 1 else ""), "Forecast AQI": round(est),
+                             "Likely range (80%)": f"{max(0, est - q):.0f} to {min(500, est + q):.0f}"})
+            st.dataframe(pd.DataFrame(rows), hide_index=True)
+            st.caption("This is the 'it stays the same' forecast with a range from past changes in the same season. "
+                       "We also trained a machine-learning model; it was no better overall (see Method tab), "
+                       "so we show the simpler forecast.")
 
         st.subheader("How wind changes the estimate")
         if est_wind is not None:
@@ -275,11 +330,18 @@ with tab_method:
     st.subheader("Typical error by season")
     st.dataframe(cal.reset_index().rename(columns={"mae": "Average error", "q50": "Median error",
                                                    "q80": "80th percentile", "q90": "90th percentile"}), hide_index=True)
+    st.subheader("Forecast test: machine learning vs 'it stays the same'")
+    st.caption("Expanding-window test over 2025-26, about 120,000 hourly forecasts per horizon. Improvement below 0 means worse than persistence.")
+    _, fsum = load_forecast_tables()
+    st.dataframe(fsum.rename(columns={"h": "Hours ahead", "variant": "Model inputs", "MAE_model": "ML error",
+                                      "MAE_persistence": "Persistence error", "improvement_%": "Improvement (%)"}), hide_index=True)
+    st.caption("ML gained about 3-8% at 3 hours in winter and nothing meaningful elsewhere. 'light' uses only live-style inputs; "
+               "'full' also uses the previous 24 hours.")
     st.subheader("Limitations")
     st.markdown(
         "- Wind weighting did **not** improve accuracy with a single city-wide wind direction, so it is off by default.\n"
         "- Error did not grow reliably with distance from the nearest station in our tests, because all tested "
         "stations sit inside the network. Estimates far outside the station area are untested.\n"
         "- Winter errors are about three times larger than monsoon errors.\n"
-        "- This app replays recorded data up to 30 Sep 2026; live updating is not switched on yet.\n"
+        "- Recorded data ends 30 Sep 2026. Live mode needs the WAQI token and uses the US AQI scale, so it is not comparable with CPCB values.\n"
         "- Station coordinates are being verified against an official source.")
